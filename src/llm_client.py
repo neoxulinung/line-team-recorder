@@ -4,12 +4,22 @@ import uuid
 import anthropic
 import openai
 
-# USD per 1M tokens, first-party pricing (Anthropic + OpenAI).
+# USD per 1M tokens, first-party pricing (Anthropic + OpenAI). Update this table if pricing
+# changes. Checked 2026-09: gpt-5/gpt-5-mini (both OpenAI's own general-purpose line) are
+# superseded by the gpt-5.6 tier below - dropped from the picker menu rather than left in as a
+# stale, no-longer-current option (still callable via the API until OpenAI's Dec 11 2026
+# retirement date, just no longer the current line). gpt-5.6-sol's $4/$20 is promotional
+# pricing confirmed live against OpenAI's pricing page, guaranteed at least through Nov 21
+# 2026 - re-check before then. GPT-6 Astra and GPT-5.5/5.4 exist too (per OpenAI's own pricing
+# docs) but aren't listed here yet - no public source gives their exact API model ID string,
+# and guessing one risks a runtime failure the first time someone actually picks it.
 MODEL_PRICES = {
+    "claude-opus-5": {"input": 5.00, "output": 25.00},
     "claude-sonnet-5": {"input": 2.00, "output": 10.00},
     "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
-    "gpt-5": {"input": 1.25, "output": 10.00},
-    "gpt-5-mini": {"input": 0.25, "output": 2.00},
+    "gpt-5.6-sol": {"input": 4.00, "output": 20.00},
+    "gpt-5.6-terra": {"input": 2.00, "output": 12.00},
+    "gpt-5.6-luna": {"input": 0.20, "output": 1.20},
 }
 
 # These are just the fallback defaults now - per-topic overrides live in topics.organize_model/
@@ -17,15 +27,14 @@ MODEL_PRICES = {
 # /模型 (a global `settings`-table override, chat-command only), this is per-topic and UI-driven -
 # see main.py's /api/topics/{id}/model and docs/plan.md for why /模型 itself was skipped.
 #
-# Temporarily on gpt-5-mini instead of Claude: the Anthropic key in .env turned out to be
-# invalid during Phase 1 testing, and rather than block the pipeline test on fixing it, we're
-# testing the OpenAI path instead. Switch these three back to claude-sonnet-5/claude-haiku-4-5
-# once ANTHROPIC_API_KEY is confirmed working - the provider is picked purely from the model ID
-# prefix below (same pattern itineraryManager uses for /模型), so flipping these constants is
-# the only change needed either way.
-ORGANIZE_MODEL = "gpt-5-mini"
-ANSWER_MODEL = "gpt-5-mini"
-FACT_CHECK_MODEL = "gpt-5-mini"
+# gpt-5.6-luna (not Claude): gpt-5-mini was superseded by the gpt-5.6 tier (see MODEL_PRICES
+# above), so this stays on the OpenAI path rather than switching back to
+# claude-sonnet-5/claude-haiku-4-5 - the provider is picked purely from the model ID prefix
+# below (same pattern itineraryManager uses for /模型), so flipping these constants is the
+# only change needed either way.
+ORGANIZE_MODEL = "gpt-5.6-luna"
+ANSWER_MODEL = "gpt-5.6-luna"
+FACT_CHECK_MODEL = "gpt-5.6-luna"
 
 
 async def call_llm(
@@ -68,9 +77,11 @@ async def _call_openai(env, model: str, system: str, user_content: str, max_toke
     response = await client.chat.completions.create(
         model=model,
         max_completion_tokens=max_tokens,
-        # Same reasoning as thinking={"type":"disabled"} above - gpt-5 is a reasoning model and
-        # would otherwise spend part of the token budget on hidden reasoning by default.
-        reasoning_effort="minimal",
+        # Same reasoning as thinking={"type":"disabled"} above - this is a reasoning model and
+        # would otherwise spend part of the token budget on hidden reasoning by default. "none"
+        # not "minimal": confirmed live against gpt-5.6 that "minimal" is no longer an accepted
+        # value (400 Unsupported value) - the accepted range is now none/low/medium/high/xhigh.
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
