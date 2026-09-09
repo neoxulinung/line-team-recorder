@@ -1,6 +1,8 @@
+import asyncio
 import hmac
 import json
 import math
+import time
 
 from fastapi import FastAPI, Request, Response
 
@@ -76,8 +78,65 @@ async def webhook(request: Request):
     return Response(content="OK", status_code=200)
 
 
+async def _handle_unsend(env: Env, event: dict) -> None:
+    line_message_id = (event.get("unsend") or {}).get("messageId")
+    if not line_message_id:
+        return
+
+    row = await env.db.query(
+        "SELECT id, topic_id, msg_type, unsent_at FROM topic_messages WHERE line_message_id = ?",
+        [line_message_id],
+    )
+    if not row.results:
+        # The "unsend" event and the original "message" event are two independent webhook
+        # deliveries (separate HTTP requests) - a fast enough recall can have this SELECT run
+        # before capture_message's INSERT lands. One retry after a short wait covers that race
+        # for both the message row itself and (since capture_message inserts the message row
+        # before awaiting _ensure_attachment) its attachment row.
+        await asyncio.sleep(1.5)
+        row = await env.db.query(
+            "SELECT id, topic_id, msg_type, unsent_at FROM topic_messages WHERE line_message_id = ?",
+            [line_message_id],
+        )
+    if not row.results:
+        return  # never captured (e.g. sent before any topic was active) - nothing to retract
+    msg = row.results[0]
+    if msg["unsent_at"]:
+        return  # redelivered/duplicate unsend event - already processed
+
+    # DB state first, R2 cleanup best-effort after: if the R2 delete throws (transient error),
+    # the retraction itself must not be lost just because storage cleanup failed - there's no
+    # LINE-level retry once this webhook has already returned 200.
+    await env.db.query(
+        "UPDATE topic_messages SET unsent_at = ?, organized_at = NULL WHERE id = ?",
+        [int(time.time()), msg["id"]],
+    )
+
+    if msg["msg_type"] == "image":
+        try:
+            atts = await env.db.query("SELECT r2_key FROM topic_attachments WHERE message_id = ?", [msg["id"]])
+            for a in atts.results:
+                await env.r2.delete(a["r2_key"])
+            await env.db.query("DELETE FROM topic_attachments WHERE message_id = ?", [msg["id"]])
+        except Exception as e:
+            print(f"[_handle_unsend attachment cleanup error] {type(e).__name__}: {e}")
+
+    topic_row = await env.db.query("SELECT status FROM topics WHERE id = ?", [msg["topic_id"]])
+    if topic_row.results and topic_row.results[0]["status"] == "ended":
+        # An ended topic is never revisited by the hourly cron sweep (active topics only) or
+        # /整理 (requires an active topic), so organized_at=NULL here would otherwise sit
+        # unprocessed forever - catch up immediately instead of leaving it stuck.
+        try:
+            await organize_topic(env, msg["topic_id"])
+        except Exception as e:
+            print(f"[_handle_unsend ended-topic catch-up error] {type(e).__name__}: {e}")
+
+
 async def _handle_event(env: Env, event: dict) -> None:
     try:
+        if event.get("type") == "unsend":
+            await _handle_unsend(env, event)
+            return
         if event.get("type") != "message":
             return
         source = event.get("source", {})

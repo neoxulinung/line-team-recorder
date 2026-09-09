@@ -4,3 +4,4 @@ httpx
 anthropic
 openai
 python-dotenv
+boto3

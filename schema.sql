@@ -20,11 +20,22 @@ CREATE TABLE topic_messages (
   line_message_id TEXT NOT NULL UNIQUE,   -- de-dupes webhook redelivery
   line_user_id TEXT NOT NULL,
   user_display_name TEXT,
+  msg_type TEXT NOT NULL DEFAULT 'text', -- 'text' | 'image' (sticker/video/etc never get a row)
   text TEXT,
   sent_at INTEGER NOT NULL,
-  organized_at INTEGER               -- NULL = not yet folded into topic_docs
+  organized_at INTEGER,              -- NULL = not yet folded into topic_docs
+  unsent_at INTEGER                  -- NULL = not recalled; set when LINE reports the sender unsent it
 );
 CREATE INDEX idx_topic_messages_pending ON topic_messages (topic_id, organized_at);
+
+-- Photo backups for 'image' rows above. r2_key points into the R2 bucket configured via
+-- R2_BUCKET_NAME; env.r2.public_url() turns it into the URL embedded in the organized doc.
+CREATE TABLE topic_attachments (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES topic_messages(id),
+  r2_key TEXT NOT NULL,
+  content_type TEXT NOT NULL
+);
 
 CREATE TABLE topic_docs (
   topic_id TEXT PRIMARY KEY REFERENCES topics(id),

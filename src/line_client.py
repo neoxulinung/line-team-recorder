@@ -6,6 +6,7 @@ import httpx
 
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 LINE_API = "https://api.line.me/v2/bot"
+LINE_DATA_API = "https://api-data.line.me/v2/bot"
 
 _TIMEOUT = httpx.Timeout(30.0, connect=15.0)
 
@@ -35,3 +36,14 @@ async def get_display_name(access_token: str, user_id: str) -> str:
         if resp.status_code != 200:
             return user_id
         return resp.json().get("displayName", user_id)
+
+
+async def get_message_content(access_token: str, message_id: str) -> tuple[bytes, str]:
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(
+            f"{LINE_DATA_API}/message/{message_id}/content",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "application/octet-stream")
+        return resp.content, content_type

@@ -14,6 +14,10 @@ CONTEXT_MESSAGE_COUNT = 15
 # such split - the same generous timeout applies everywhere - so one cap is enough.
 MAX_BATCH_CHARS = 6000
 MAX_FETCH_ROWS = 1000
+# Flat per-message char estimate for images when computing the MAX_BATCH_CHARS budget - text
+# is NULL for image rows (messages.py never stores it for them), so without this an unbounded
+# run of photos would slip past the budget entirely. Ported from itineraryManager's same fix.
+IMAGE_CHAR_ESTIMATE = 150
 
 TW_TZ = timezone(timedelta(hours=8))
 
@@ -30,16 +34,20 @@ GENERIC_ORGANIZE_PROMPT = (
     "把「新增的討論內容」中跟這個主題相關的內容整理進文件，用清楚的條列式呈現，保留既有內容、"
     "不要整篇重寫。每個新增或修改的結論旁邊用一行小字附上來源引用，格式類似：_(依 王小明 8/20 "
     "14:02 提及)_，日期用訊息的實際日期。不相關的閒聊請忽略，不要為它們新增任何內容。"
+    "如果訊息附了照片且與內容相關，用markdown圖片語法 ![說明](圖片URL) 直接嵌入該段落。"
+    "如果訊息標記「已收回」，代表發送者事後收回了那則訊息，請檢查文件裡有沒有根據那則訊息新增的"
+    "內容，如果有就移除或修正；如果那則訊息從未被寫進文件，直接忽略即可。"
     "如果訊息裡附了「近期對話紀錄」，那只是給你參考理解上下文用的，不需要為它本身新增或修改"
     "文件內容，也絕對不要把那段內容原封不動複製或引用進輸出的文件裡。"
     "直接輸出完整更新後的markdown全文，不要加任何額外說明、不要用程式碼區塊包起來。"
 )
 
-# Ported from itineraryManager's organize.py SYSTEM_PROMPT, trimmed of two rules that don't
-# apply here: photo embedding (this project doesn't capture images, see messages.py) and
-# unsend-message handling (no unsend webhook event is captured either). The original's "this
-# heading gets parsed by code, don't remove it" line is also dropped - unlike itineraryManager,
-# nothing here reads "## 未定事項" back out, so it would be a false claim.
+# Ported from itineraryManager's organize.py SYSTEM_PROMPT. Originally trimmed of the photo
+# and unsend-message rules when this project only captured text - both are now implemented
+# (messages.py._ensure_attachment, main.py._handle_unsend), so the full original text applies
+# again. The one line still dropped on purpose: itineraryManager's "「## 未定事項」這個標題會被
+# 程式抓取，不要拿掉" - unlike itineraryManager, nothing here reads that heading back out
+# (no `/未定事項` command in this project), so keeping that sentence would be a false claim.
 TRAVEL_ORGANIZE_PROMPT = """你是旅行規劃助手的整理引擎。你會收到一份目前的旅程markdown文件、一段近期對話（僅供參考），以及一批新的LINE群組討論訊息。
 你的工作是把「新增的討論內容」中「旅遊規劃相關」的內容整合進文件裡，回傳完整的、更新後的整份markdown文件。
 
@@ -52,9 +60,11 @@ TRAVEL_ORGANIZE_PROMPT = """你是旅行規劃助手的整理引擎。你會收�
    ## 未定事項 —— 還在討論、尚未拍板的事情，用checkbox列表 `- [ ] ...`
    ## 其他資訊 —— 機票、訂房確認信、重要連結等不屬於時間軸的資訊
 5. 如果訊息讓某件事從未定變成已定（或反過來被推翻），把它從對應章節移過去，不要兩邊同時留著重複內容。
-6. 不要憑空捏造內容、不要猜測日期，資料沒有明確提到就不要寫。
-7. 對話中常有一人提問、另一人（甚至是自己）在後續幾則訊息才回答的情況（例如「機票訂了嗎」→ 幾則之後「13號」）。請先通盤讀過「新增的討論內容」，把問句和對應的回答串起來理解事情的全貌，不要只因為某則訊息單獨看起來像片段、太簡短，或跟前一句話中間隔了幾則其他訊息，就忽略它或誤判成閒聊。
-8. 直接輸出完整更新後的markdown全文，不要加任何額外說明、不要用程式碼區塊包起來。"""
+6. 如果訊息附了照片且與內容相關，用markdown圖片語法 `![說明](圖片URL)` 直接嵌入該段落。
+7. 不要憑空捏造內容、不要猜測日期，資料沒有明確提到就不要寫。
+8. 對話中常有一人提問、另一人（甚至是自己）在後續幾則訊息才回答的情況（例如「機票訂了嗎」→ 幾則之後「13號」）。請先通盤讀過「新增的討論內容」，把問句和對應的回答串起來理解事情的全貌，不要只因為某則訊息單獨看起來像片段、太簡短，或跟前一句話中間隔了幾則其他訊息，就忽略它或誤判成閒聊。
+9. 直接輸出完整更新後的markdown全文，不要加任何額外說明、不要用程式碼區塊包起來。
+10. 如果「新增的討論內容」裡有標記「已收回訊息」的項目，代表發送者事後收回了那則訊息。請檢查文件裡有沒有根據那則訊息新增的內容，如果有，把它移除或修正（例如靠這則訊息才確定的行程要移回未定事項，或整段移除）；如果那則訊息從未被寫進文件裡，直接忽略即可，不需要新增任何內容。"""
 
 # LIFF prompt-editor dropdown. Values are the actual prompt text - selecting one just fills
 # the textarea, the owner can still edit before saving. Add an entry here to add a preset;
@@ -99,9 +109,22 @@ async def save_doc_revision(
     )
 
 
-def _format_line(row: dict) -> str:
+def _format_line(row: dict, image_url: str | None) -> str:
+    if row["msg_type"] not in ("text", "image"):
+        return ""  # sticker/video/etc: nothing useful to organize from, skip (unsent or not)
+
     ts = datetime.fromtimestamp(row["sent_at"], tz=TW_TZ).strftime("%m/%d %H:%M")
-    return f"[{ts}] {row['user_display_name']}: {row['text']}"
+    who = row["user_display_name"]
+    if row["unsent_at"]:
+        # The attachment (if any) is already deleted by the time this runs (see
+        # main.py._handle_unsend), so there's never an image_url to show here regardless of
+        # msg_type - just flag the retraction itself.
+        content = "（已收回一則訊息）" if row["msg_type"] == "image" else f"（已收回訊息，原內容：{row['text']}）"
+    elif row["msg_type"] == "image":
+        content = f"[傳送照片] 圖片連結: {image_url}" if image_url else "[傳送照片]（備份失敗，無法取得連結）"
+    else:
+        content = row["text"]
+    return f"[{ts}] {who}: {content}"
 
 
 class OrganizeResult(NamedTuple):
@@ -114,7 +137,7 @@ async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> Organize
     # ponytail: no lock around this read-modify-write, same accepted stance as itineraryManager -
     # friend-group chat cadence, not a real race in practice at this scale.
     pending = await env.db.query(
-        "SELECT id, user_display_name, text, sent_at FROM topic_messages "
+        "SELECT id, user_display_name, msg_type, text, sent_at, unsent_at FROM topic_messages "
         "WHERE topic_id = ? AND organized_at IS NULL ORDER BY sent_at LIMIT ?",
         [topic_id, MAX_FETCH_ROWS],
     )
@@ -125,18 +148,32 @@ async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> Organize
     rows = []
     batch_chars = 0
     for row in all_pending:
-        row_chars = len(row["text"] or "")
+        # text is NULL for image rows (messages.py never stores it for them) - charge a flat
+        # estimate instead of letting them count as free and slip past the budget entirely.
+        row_chars = len(row["text"] or "") if row["msg_type"] == "text" else IMAGE_CHAR_ESTIMATE
         if rows and batch_chars + row_chars > MAX_BATCH_CHARS:
             break
         rows.append(row)
         batch_chars += row_chars
 
     context_desc = await env.db.query(
-        "SELECT user_display_name, text, sent_at FROM topic_messages "
+        "SELECT id, user_display_name, msg_type, text, sent_at, unsent_at FROM topic_messages "
         "WHERE topic_id = ? AND organized_at IS NOT NULL ORDER BY sent_at DESC LIMIT ?",
         [topic_id, CONTEXT_MESSAGE_COUNT],
     )
     context_rows = list(reversed(context_desc.results))
+
+    # A context row can be an image too (organized_at gets set on every row in a batch,
+    # images included) - resolve its real URL rather than hardcoding "backup failed".
+    image_ids = [row["id"] for row in rows + context_rows if row["msg_type"] == "image"]
+    image_urls: dict[str, str] = {}
+    if image_ids:
+        placeholder = ", ".join("?" for _ in image_ids)
+        atts = await env.db.query(
+            f"SELECT message_id, r2_key FROM topic_attachments WHERE message_id IN ({placeholder})",
+            image_ids,
+        )
+        image_urls = {a["message_id"]: env.r2.public_url(a["r2_key"]) for a in atts.results}
 
     topic_row = await env.db.query("SELECT name, organize_prompt FROM topics WHERE id = ?", [topic_id])
     topic = topic_row.results[0]
@@ -145,10 +182,11 @@ async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> Organize
     if current_doc is None:
         current_doc = EMPTY_DOC_TEMPLATE.format(name=topic["name"])
 
-    batch_text = "\n".join(_format_line(r) for r in rows)
+    batch_text = "\n".join(line for r in rows if (line := _format_line(r, image_urls.get(r["id"]))))
+    context_lines = "\n".join(line for r in context_rows if (line := _format_line(r, image_urls.get(r["id"]))))
     context_block = (
         "\n\n---\n\n近期對話紀錄（僅供參考，用來理解下方新訊息的上下文，不需要為這段內容本身更新文件）：\n"
-        + "\n".join(_format_line(r) for r in context_rows)
+        + context_lines
         if context_rows else ""
     )
     user_content = (
