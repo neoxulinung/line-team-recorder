@@ -16,19 +16,29 @@ full design rationale and a running log of real bugs found and fixed along the w
 
 ## What it does
 
-- **Passive capture**: while a topic is active, every text message sent in the LINE group is
-  recorded. The bot stays silent otherwise — it never speaks unless a command asks it to.
+- **Passive capture**: while a topic is active, every text and photo message sent in the LINE
+  group is recorded. The bot stays silent otherwise — it never speaks unless a command asks it
+  to.
 - **LLM-organized doc, custom per topic**: on a schedule (and on demand via `/整理`), an LLM
   folds newly captured messages into a single markdown document per topic, following that
-  topic's own `organize_prompt` (editable via the LIFF page). Leave the default generic prompt
-  for a simple running summary, or set a detailed one (e.g. "timeline / open questions /
-  everything else" with source citations) for something closer to itineraryManager's format.
+  topic's own `organize_prompt` (editable via the LIFF page, with a 通用/旅遊規劃 preset
+  dropdown to start from). Leave the default generic prompt for a simple running summary, or
+  set a detailed one (e.g. "timeline / open questions / everything else" with source
+  citations) for something closer to itineraryManager's format.
+- **Photos and message recall**: an image sent while a topic is active is saved to Cloudflare
+  R2 and embedded into the doc via markdown; if someone recalls ("unsend") a message, the next
+  organize pass removes or corrects anything the doc already derived from it.
 - **Q&A with grounding**: `/問 <question>` answers from the topic's document only, never from
   the model's own knowledge, and says it doesn't know when the doc doesn't have an answer.
 - **Fact-check pass**: a second LLM pass, run after every organize, flags anything added that
   doesn't actually trace back to a real message — queryable via `/檢查`.
+- **Per-topic model choice**: the LIFF page lets you pick which model (Claude Sonnet/Haiku,
+  GPT-5, GPT-5 mini) handles organizing/Q&A/fact-checking for that specific topic — leave it on
+  "use default" and it follows whatever `src/llm_client.py`'s constants are set to.
 - **LIFF page**: a shareable web page rendering the current doc (with manual-edit and full
-  version history), plus expenses/poll if those modules are enabled for the topic.
+  version history), plus expenses/poll if those modules are enabled for the topic. `/懶人包`
+  posts a button straight to it; `/開始` also nudges the group to add the bot as a friend
+  (needed for real display names — see "Design choices" below) with a one-tap link.
 - **Optional modules, opt in per topic**: expense-splitting (`/記帳`, `/結算`) and voting
   (`/投票`) are off by default — turn them on when starting a topic and they can't be added
   mid-topic (start a new topic instead). Adding a future module doesn't require a schema
@@ -54,6 +64,7 @@ All commands are Traditional Chinese slash-commands, typed directly in the LINE 
 | `/問 <question>` | Answers strictly from the topic's document — never guesses. |
 | `/檢查` | Shows anything the fact-check pass flagged as unsupported by the source messages. |
 | `/整理` | Manually triggers the organize step (also runs hourly on its own). |
+| `/懶人包` | Posts a button linking straight to the topic's LIFF page. |
 
 **💰 Expenses** (only if 記帳 was enabled for this topic)
 
@@ -87,9 +98,11 @@ Casting/changing a vote is LIFF-only, multi-select, toggle on tap.
 - **Modules are locked in at topic start.** `記帳`/`投票` can't be toggled mid-topic; start a
   new topic if you need a different combination.
 - **Traditional Chinese only**, currently — all commands, replies, and the LIFF UI.
-- **Text messages only.** Unlike itineraryManager, there's no photo capture or R2 storage in
-  this project (Phase 1 scope decision) — this can be added later without touching the schema
-  used for messages.
+- **Friending the bot matters.** LINE's profile API only resolves a real display name for
+  people who've added the bot as a friend (`/開始` nudges for this) — anyone who hasn't shows
+  up as a raw LINE user ID instead. This self-heals automatically for anything organized
+  *after* they friend the bot; text already written into the doc before that needs the LIFF
+  page's 🔄 修正名稱顯示 button (or another `/整理` pass, for messages not yet organized).
 
 ### Adding a module
 
@@ -110,6 +123,9 @@ to that dict and its command handlers — no migration, no framework.
 - **Cloudflare D1** (SQLite) for everything relational, accessed via its
   [REST API](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/)
   rather than a Workers binding, since Cloud Run isn't a Workers runtime.
+- **Cloudflare R2** for photo storage, accessed through its S3-compatible API via `boto3`
+  (`src/r2.py`, sync client run through `asyncio.to_thread` since R2 has no first-party async
+  client) — same reasoning as D1 above, no Workers binding available outside a Worker.
 - **Cloud Scheduler** triggers an hourly organize/fact-check sweep over a signed internal
   endpoint (`/internal/scheduled-organize`, guarded by a shared-secret header).
 - **Anthropic or OpenAI API** for the LLM calls (organize / Q&A / fact-check), whichever
@@ -135,6 +151,8 @@ Realistically well under $5/month at friend-group scale:
   webhook + hourly-cron traffic doesn't come close.
 - **Cloudflare D1**: free tier (5GB storage, 5M reads + 100k writes/day) — same as
   itineraryManager, easily enough.
+- **Cloudflare R2**: free tier (10GB storage, no egress fees) — a friend group's photo volume
+  doesn't come close.
 - **Cloud Scheduler**: free tier covers 3 jobs; this project uses 1.
 - **LINE Messaging API**: $0 — every reply is a reply message (LINE doesn't charge for or
   count those against any quota); the bot never sends push messages.
@@ -160,18 +178,25 @@ Same idea as itineraryManager — create a separate LINE Login channel, add a LI
 with endpoint `https://<your-cloud-run-url>/liff`, scope `profile`, note the LIFF ID, and
 publish the channel.
 
-### 3. Cloudflare D1
+### 3. Cloudflare D1 and R2
 
 ```sh
 npx wrangler login   # if you haven't already
 npx wrangler d1 create line-team-recorder-db   # note the database_id it prints
 npx wrangler d1 execute line-team-recorder-db --remote --file schema.sql
+npx wrangler r2 bucket create <a-globally-unique-bucket-name>
 ```
 
 Then create a Cloudflare API token (dashboard → My Profile → API Tokens → "Create Token",
 permission `D1:Edit` scoped to your account) — the D1 binding used by Cloudflare Workers isn't
 available here since this project runs on Cloud Run, so D1 is reached over its REST API
 instead. Note your account ID (dashboard sidebar) and the database ID from above.
+
+Separately, create an R2 API token (dashboard → R2 → Manage R2 API Tokens → "Create API
+token", permission "Object Read & Write", scoped to the bucket you just created) for
+`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` — this is a different kind of token than the D1 one
+above. Enable public access on the bucket (dashboard → your bucket → Settings → Public access)
+and note the `pub-*.r2.dev` URL it gives you for `R2_PUBLIC_BASE_URL`.
 
 ### 4. GCP project and Cloud Run
 
@@ -183,8 +208,8 @@ gcloud services enable run.googleapis.com cloudscheduler.googleapis.com
 ```
 
 Copy `.env.example` to `.env` and fill in every value (LINE channel secret/token, LLM API
-key(s), the Cloudflare account/database ID and API token from step 3, the LIFF ID from step 2,
-and a random `SCHEDULER_SECRET`, e.g. `openssl rand -hex 32`).
+key(s), the Cloudflare account/D1 database ID/D1 API token/R2 keys and bucket info from step 3,
+the LIFF ID from step 2, and a random `SCHEDULER_SECRET`, e.g. `openssl rand -hex 32`).
 
 Deploy, passing `.env`'s contents as environment variables (do **not** commit a
 `--set-env-vars` value list containing secrets to shell history in plain text — pipe it from
