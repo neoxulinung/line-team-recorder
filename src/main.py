@@ -56,25 +56,21 @@ HELP_TEXT = """🤖 可用指令：
 Bot只會在主題進行中被動記錄訊息，其餘時間不會插話，所有回覆都要靠上面的指令觸發。"""
 
 
-# LINE's basic ID for this channel (from GET /v2/bot/info) - not a secret, it's the same public
-# ID anyone finds by searching for the bot in LINE. Hardcoded rather than an env var: it's
-# effectively permanent for a given channel, not worth a deploy-config round trip to change.
-LINE_ADD_FRIEND_URL = "https://line.me/R/ti/p/@YOUR_BOT_BASIC_ID"
-
-ADD_FRIEND_NUDGE = {
-    "type": "template",
-    "altText": f"記得加我好友：{LINE_ADD_FRIEND_URL}",
-    "template": {
-        "type": "buttons",
-        # get_display_name (line_client.py) can only resolve a real name for people who've
-        # added the bot as a friend - anyone who hasn't shows up as a raw LINE user ID in the
-        # doc/replies instead of their name (see docs/plan.md's carried-over itineraryManager
-        # lesson). Surfacing this at /開始 time is cheaper than everyone finding out later from
-        # a document full of "U6a4d51e9..." citations.
-        "text": "還沒加我好友的人記得加一下，不然之後訊息裡你的名字會顯示成一串英數字",
-        "actions": [{"type": "uri", "label": "➕ 加好友", "uri": LINE_ADD_FRIEND_URL}],
-    },
-}
+def _add_friend_nudge(env: Env) -> dict:
+    # get_display_name (line_client.py) can only resolve a real name for people who've added
+    # the bot as a friend - anyone who hasn't shows up as a raw LINE user ID in the doc/replies
+    # instead of their name (see docs/plan.md's carried-over itineraryManager lesson).
+    # Surfacing this at /開始 time is cheaper than everyone finding out later from a document
+    # full of "U6a4d51e9..." citations.
+    return {
+        "type": "template",
+        "altText": f"記得加我好友：{env.line_add_friend_url}",
+        "template": {
+            "type": "buttons",
+            "text": "還沒加我好友的人記得加一下，不然之後訊息裡你的名字會顯示成一串英數字",
+            "actions": [{"type": "uri", "label": "➕ 加好友", "uri": env.line_add_friend_url}],
+        },
+    }
 
 
 def _liff_button_message(env: Env, topic: dict, alt_text: str, button_text: str, button_label: str) -> dict:
@@ -219,7 +215,7 @@ async def _dispatch_command(env: Env, text: str, message: dict, group_id: str, u
             "要不要先設定一下這個主題的整理prompt？預設是通用版，也可以換成旅遊規劃範本或自己寫",
             "📝 設定整理prompt",
         )
-        return [{"type": "text", "text": reply}, ADD_FRIEND_NUDGE, nudge]
+        return [{"type": "text", "text": reply}, _add_friend_nudge(env), nudge]
 
     if cmd == "/結束":
         reply, ended_topic_id = await end_topic(env, group_id, user_id)

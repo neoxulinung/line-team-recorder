@@ -19,6 +19,7 @@ class Env:
     openai_api_key: str
     liff_id: str
     scheduler_secret: str
+    line_add_friend_url: str
 
 
 _env: Env | None = None
@@ -52,5 +53,10 @@ def get_env() -> Env:
             openai_api_key=os.environ["OPENAI_API_KEY"],
             liff_id=os.environ.get("LIFF_ID", ""),
             scheduler_secret=os.environ.get("SCHEDULER_SECRET", ""),
+            # LINE's basic ID for this channel (from GET /v2/bot/info) - not a secret, it's the
+            # same public ID anyone finds by searching for the bot in LINE. Env var rather than
+            # hardcoded so the public repo doesn't point strangers straight at this deployment's
+            # real friend group bot.
+            line_add_friend_url=os.environ.get("LINE_ADD_FRIEND_URL", ""),
         )
     return _env
