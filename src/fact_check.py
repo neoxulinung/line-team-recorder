@@ -24,9 +24,12 @@ def _strip_code_fence(text: str) -> str:
     return text.strip()
 
 
-async def fact_check_topic(env, topic_id: str, new_doc: str, batch_text: str) -> None:
+async def fact_check_topic(env, topic_id: str, new_doc: str, batch_text: str, model: str = FACT_CHECK_MODEL) -> None:
+    # model comes from organize_topic's OrganizeResult (it already fetched this topic's row) -
+    # both call sites in main.py always pass it; the default here only covers a hypothetical
+    # future caller that hasn't already run organize_topic first.
     user_content = f"主題文件（最新版）：\n{new_doc}\n\n---\n\n這批用來更新文件的原始訊息：\n{batch_text}"
-    raw = await call_llm(env, "fact_check", topic_id, FACT_CHECK_MODEL, SYSTEM_PROMPT, user_content, max_tokens=4096)
+    raw = await call_llm(env, "fact_check", topic_id, model, SYSTEM_PROMPT, user_content, max_tokens=4096)
     try:
         issues = json.loads(_strip_code_fence(raw))
     except ValueError:

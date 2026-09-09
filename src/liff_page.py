@@ -49,6 +49,7 @@ let ME = null;           // { userId, displayName } from liff.getProfile()
 let EDITING_ID = null;   // expense id being edited, or null for "create new"
 let DOC_HISTORY = [];    // last fetched revisions list, for viewDocRevision(index) to read back
 let PROMPT_PRESETS = {}; // name -> prompt text, fetched once in main()
+let MODEL_OPTIONS = { models: [], defaults: {} }; // fetched once in main()
 
 function escapeHtml(s) {
   return String(s == null ? '' : s)
@@ -89,7 +90,9 @@ function render(data) {
     '<span class="status ' + data.status + '">' + statusLabel + '</span>' +
     '<div style="margin:6px 0 10px;">' +
       '<button class="link-btn" onclick="startDocEdit()">✏️ 編輯文件</button>　' +
-      '<button class="link-btn" onclick="startPromptEdit()">⚙️ 編輯整理規則</button>' +
+      '<button class="link-btn" onclick="startPromptEdit()">⚙️ 編輯整理規則</button>　' +
+      '<button class="link-btn" onclick="startModelEdit()">🤖 模型設定</button>　' +
+      '<button class="link-btn" onclick="resyncNames()">🔄 修正名稱顯示</button>' +
     '</div>' +
     '<div id="docView">' + itineraryBody + '</div>' +
     '<div id="docEditForm" style="display:none">' +
@@ -111,6 +114,16 @@ function render(data) {
       '<div style="margin-top:8px;">' +
         '<button class="primary-btn" onclick="submitPromptEdit()">儲存</button>' +
         '<button class="link-btn" onclick="cancelPromptEdit()">取消</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="modelEditForm" style="display:none">' +
+      '<p class="meta">選「使用預設」會跟著系統之後調整的預設模型走，選特定模型則固定用那個，直到你再改回來。</p>' +
+      '<div class="field"><label>整理</label><select id="modelSelect_organize"></select></div>' +
+      '<div class="field"><label>問答</label><select id="modelSelect_answer"></select></div>' +
+      '<div class="field"><label>查核</label><select id="modelSelect_fact_check"></select></div>' +
+      '<div style="margin-top:8px;">' +
+        '<button class="primary-btn" onclick="submitModelEdit()">儲存</button>' +
+        '<button class="link-btn" onclick="cancelModelEdit()">取消</button>' +
       '</div>' +
     '</div>';
 
@@ -150,6 +163,7 @@ function render(data) {
 function startDocEdit() {
   document.getElementById('docHistory').style.display = 'none';
   document.getElementById('promptEditForm').style.display = 'none';
+  document.getElementById('modelEditForm').style.display = 'none';
   document.getElementById('docView').style.display = 'none';
   document.getElementById('docTextarea').value = TOPIC_DATA.content_md || '';
   document.getElementById('docEditForm').style.display = 'block';
@@ -183,6 +197,7 @@ async function submitDocEdit() {
 function startPromptEdit() {
   document.getElementById('docHistory').style.display = 'none';
   document.getElementById('docEditForm').style.display = 'none';
+  document.getElementById('modelEditForm').style.display = 'none';
   document.getElementById('docView').style.display = 'none';
   document.getElementById('promptTextarea').value = TOPIC_DATA.organize_prompt || '';
   const select = document.getElementById('presetSelect');
@@ -224,6 +239,54 @@ async function submitPromptEdit() {
   }
 }
 
+function startModelEdit() {
+  document.getElementById('docHistory').style.display = 'none';
+  document.getElementById('docEditForm').style.display = 'none';
+  document.getElementById('promptEditForm').style.display = 'none';
+  document.getElementById('docView').style.display = 'none';
+  ['organize', 'answer', 'fact_check'].forEach(function (purpose) {
+    const select = document.getElementById('modelSelect_' + purpose);
+    select.innerHTML = '<option value="">使用預設（' + MODEL_OPTIONS.defaults[purpose] + '）</option>' +
+      MODEL_OPTIONS.models.map(function (m) { return '<option value="' + m + '">' + m + '</option>'; }).join('');
+    const current = TOPIC_DATA[purpose + '_model'];
+    select.value = MODEL_OPTIONS.models.includes(current) ? current : '';
+  });
+  document.getElementById('modelEditForm').style.display = 'block';
+}
+
+function cancelModelEdit() {
+  document.getElementById('modelEditForm').style.display = 'none';
+  document.getElementById('docView').style.display = 'block';
+}
+
+async function submitModelEdit() {
+  const body = {};
+  ['organize', 'answer', 'fact_check'].forEach(function (purpose) {
+    body[purpose + '_model'] = document.getElementById('modelSelect_' + purpose).value;
+  });
+  try {
+    await api('/api/topics/' + TOPIC_ID + '/model', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    cancelModelEdit();
+    await loadTopic();
+  } catch (e) {
+    alert('儲存失敗，請稍後再試');
+  }
+}
+
+async function resyncNames() {
+  try {
+    const res = await api('/api/topics/' + TOPIC_ID + '/resync-names', { method: 'POST' });
+    await loadTopic();
+    alert(res.changed ? '已更新名稱顯示' : '目前沒有需要修正的名稱');
+  } catch (e) {
+    alert('修正失敗，請稍後再試');
+  }
+}
+
 async function toggleDocHistory() {
   const el = document.getElementById('docHistory');
   if (el.style.display !== 'none') {
@@ -232,6 +295,7 @@ async function toggleDocHistory() {
   }
   document.getElementById('docEditForm').style.display = 'none';
   document.getElementById('promptEditForm').style.display = 'none';
+  document.getElementById('modelEditForm').style.display = 'none';
   document.getElementById('docView').style.display = 'block';
   try {
     const data = await api('/api/topics/' + TOPIC_ID + '/doc/revisions');
@@ -270,6 +334,7 @@ function viewDocRevision(index) {
   document.getElementById('docHistory').style.display = 'none';
   document.getElementById('docEditForm').style.display = 'none';
   document.getElementById('promptEditForm').style.display = 'none';
+  document.getElementById('modelEditForm').style.display = 'none';
   const time = new Date(r.created_at * 1000).toLocaleString('zh-TW', { hour12: false });
   const view = document.getElementById('docView');
   view.style.display = 'block';
@@ -498,6 +563,7 @@ async function main() {
   try { await liff.init({ liffId: "__LIFF_ID__" }); } catch (e) { /* fine outside LINE too */ }
   try { ME = await liff.getProfile(); } catch (e) { ME = null; }
   try { PROMPT_PRESETS = await api('/api/prompt-presets'); } catch (e) { PROMPT_PRESETS = {}; }
+  try { MODEL_OPTIONS = await api('/api/model-options'); } catch (e) { MODEL_OPTIONS = { models: [], defaults: {} }; }
 
   TOPIC_ID = new URLSearchParams(location.search).get('topicId');
   if (!TOPIC_ID) {

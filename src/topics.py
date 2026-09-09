@@ -28,13 +28,15 @@ async def get_active_or_last_topic(env, group_id: str) -> dict | None:
 ALREADY_ACTIVE_MSG = "⚠️ 這個群組已經有進行中的主題了，請先 /結束 再開新的"
 
 
-async def start_topic(env, group_id: str, user_id: str, name: str, enabled_modules: list[str]) -> str:
+async def start_topic(
+    env, group_id: str, user_id: str, name: str, enabled_modules: list[str]
+) -> tuple[str, str | None]:
     name = name.strip()
     if not name:
-        return "⚠️ 請輸入主題名稱，例如：/開始 讀書會進度"
+        return "⚠️ 請輸入主題名稱，例如：/開始 讀書會進度", None
 
     if await get_active_topic(env, group_id):
-        return ALREADY_ACTIVE_MSG
+        return ALREADY_ACTIVE_MSG, None
 
     topic_id = str(uuid.uuid4())
     now = int(time.time())
@@ -49,9 +51,9 @@ async def start_topic(env, group_id: str, user_id: str, name: str, enabled_modul
     except Exception:
         # idx_topics_one_active_per_group caught a race: someone else's /開始 committed
         # between our check above and this insert.
-        return ALREADY_ACTIVE_MSG
+        return ALREADY_ACTIVE_MSG, None
     suffix = f"（已開啟：{'、'.join(enabled_modules)}）" if enabled_modules else ""
-    return f"📝 主題「{name}」開始了{suffix}！我會開始記錄接下來的討論。"
+    return f"📝 主題「{name}」開始了{suffix}！我會開始記錄接下來的討論。", topic_id
 
 
 async def end_topic(env, group_id: str, user_id: str) -> tuple[str, str | None]:

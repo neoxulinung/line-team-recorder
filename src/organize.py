@@ -1,9 +1,11 @@
+import asyncio
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
-from llm_client import ORGANIZE_MODEL, call_llm
+from line_client import refresh_display_name
+from llm_client import FACT_CHECK_MODEL, ORGANIZE_MODEL, call_llm
 
 # How many already-organized messages to show as context, so the LLM can resolve references
 # that span a batch boundary. Same idea as itineraryManager's CONTEXT_MESSAGE_COUNT.
@@ -88,6 +90,47 @@ async def get_doc_content(env, topic_id: str) -> str | None:
     return row.results[0]["content_md"] if row.results else None
 
 
+async def _resolve_stale_names(env, pairs: list[tuple[str, str]]) -> dict[str, str]:
+    # pairs: (line_user_id, user_display_name). Returns {uid: fresh_name}, only for uids whose
+    # stored name is still just the raw id - see line_client.refresh_display_name.
+    stale_ids = list({uid for uid, name in pairs if name == uid})
+    if not stale_ids:
+        return {}
+    # Concurrent, not sequential - /webhook now awaits this whole call before replying to LINE
+    # (no background task, see main.py), so N sequential profile-API round trips would add
+    # straight to that reply latency.
+    fresh_names = await asyncio.gather(*(refresh_display_name(env, uid, uid) for uid in stale_ids))
+    return {uid: fresh for uid, fresh in zip(stale_ids, fresh_names) if fresh != uid}
+
+
+async def resync_display_names(env, topic_id: str) -> bool:
+    # organize_topic's self-heal above only reaches text the LLM writes in its *next* pass, and
+    # the organize prompt is told to preserve existing content - so a citation already written
+    # against a stale UID (before that person friended the bot) never gets touched again by
+    # /整理 alone, even once the DB itself is fixed. This is the on-demand version: scan every
+    # speaker this topic has ever seen, refresh anyone still stale, and patch the literal UID
+    # substring directly into the existing document text. UIDs are long unique tokens, so a
+    # plain string replace is safe. Powers the LIFF page's 🔄 修正名稱顯示 button.
+    current_doc = await get_doc_content(env, topic_id)
+    if not current_doc:
+        return False
+
+    rows = await env.db.query(
+        "SELECT DISTINCT line_user_id, user_display_name FROM topic_messages WHERE topic_id = ?", [topic_id]
+    )
+    names = {row["line_user_id"]: row["user_display_name"] for row in rows.results}
+    names.update(await _resolve_stale_names(env, list(names.items())))
+
+    new_doc = current_doc
+    for uid, name in names.items():
+        if name != uid and uid in new_doc:
+            new_doc = new_doc.replace(uid, name)
+    if new_doc == current_doc:
+        return False
+    await save_doc_revision(env, topic_id, new_doc, edited_by_display_name="🤖 自動修正名稱顯示")
+    return True
+
+
 async def save_doc_revision(
     env, topic_id: str, content_md: str, *,
     triggered_by_message_id: str | None = None,
@@ -131,19 +174,23 @@ class OrganizeResult(NamedTuple):
     count: int
     new_doc: str | None
     batch_text: str | None
+    # Effective fact_check_model for this topic - only meaningful when new_doc is set (the only
+    # case main.py actually calls fact_check_topic), carried here so it doesn't need its own
+    # SELECT for a topic row this function already fetched moments earlier.
+    fact_check_model: str | None
 
 
 async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> OrganizeResult:
     # ponytail: no lock around this read-modify-write, same accepted stance as itineraryManager -
     # friend-group chat cadence, not a real race in practice at this scale.
     pending = await env.db.query(
-        "SELECT id, user_display_name, msg_type, text, sent_at, unsent_at FROM topic_messages "
+        "SELECT id, line_user_id, user_display_name, msg_type, text, sent_at, unsent_at FROM topic_messages "
         "WHERE topic_id = ? AND organized_at IS NULL ORDER BY sent_at LIMIT ?",
         [topic_id, MAX_FETCH_ROWS],
     )
     all_pending = pending.results
     if not all_pending:
-        return OrganizeResult(0, None, None)
+        return OrganizeResult(0, None, None, None)
 
     rows = []
     batch_chars = 0
@@ -157,11 +204,20 @@ async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> Organize
         batch_chars += row_chars
 
     context_desc = await env.db.query(
-        "SELECT id, user_display_name, msg_type, text, sent_at, unsent_at FROM topic_messages "
+        "SELECT id, line_user_id, user_display_name, msg_type, text, sent_at, unsent_at FROM topic_messages "
         "WHERE topic_id = ? AND organized_at IS NOT NULL ORDER BY sent_at DESC LIMIT ?",
         [topic_id, CONTEXT_MESSAGE_COUNT],
     )
     context_rows = list(reversed(context_desc.results))
+
+    # Resolve any speaker whose stored name is still just their raw LINE userId (captured
+    # before they'd friended the bot) - see line_client.refresh_display_name. This is the one
+    # universal surface (every topic goes through organize_topic, unlike the opt-in 記帳/投票
+    # modules that already did this) so it's the right place to self-heal it.
+    resolved = await _resolve_stale_names(env, [(row["line_user_id"], row["user_display_name"]) for row in rows + context_rows])
+    for row in rows + context_rows:
+        if row["line_user_id"] in resolved:
+            row["user_display_name"] = resolved[row["line_user_id"]]
 
     # A context row can be an image too (organized_at gets set on every row in a batch,
     # images included) - resolve its real URL rather than hardcoding "backup failed".
@@ -175,7 +231,9 @@ async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> Organize
         )
         image_urls = {a["message_id"]: env.r2.public_url(a["r2_key"]) for a in atts.results}
 
-    topic_row = await env.db.query("SELECT name, organize_prompt FROM topics WHERE id = ?", [topic_id])
+    topic_row = await env.db.query(
+        "SELECT name, organize_prompt, organize_model, fact_check_model FROM topics WHERE id = ?", [topic_id]
+    )
     topic = topic_row.results[0]
 
     current_doc = await get_doc_content(env, topic_id)
@@ -198,7 +256,8 @@ async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> Organize
     organize_prompt = topic["organize_prompt"] or GENERIC_ORGANIZE_PROMPT
     system = organize_prompt + f"\n\n文件開頭必須保留「# {topic['name']}」這個標題，不要拿掉或改名。"
 
-    new_doc = await call_llm(env, "organize", topic_id, ORGANIZE_MODEL, system, user_content, max_tokens=max_tokens)
+    model = topic["organize_model"] or ORGANIZE_MODEL
+    new_doc = await call_llm(env, "organize", topic_id, model, system, user_content, max_tokens=max_tokens)
     new_doc = new_doc.strip() or current_doc
 
     last_message_id = rows[-1]["id"]
@@ -212,4 +271,9 @@ async def organize_topic(env, topic_id: str, max_tokens: int = 8000) -> Organize
         f"UPDATE topic_messages SET organized_at = ? WHERE id IN ({ids_placeholder})",
         [now, *[r["id"] for r in rows]],
     )
-    return OrganizeResult(len(rows), new_doc if changed else None, batch_text if changed else None)
+    return OrganizeResult(
+        len(rows),
+        new_doc if changed else None,
+        batch_text if changed else None,
+        (topic["fact_check_model"] or FACT_CHECK_MODEL) if changed else None,
+    )

@@ -12,9 +12,10 @@ MODEL_PRICES = {
     "gpt-5-mini": {"input": 0.25, "output": 2.00},
 }
 
-# No /模型 in Phase 1 (see docs/plan.md - itineraryManager only built that after hitting a real
-# connectivity pain point; this project doesn't have one yet). Fixed constants, add a
-# `settings`-table override later if that changes.
+# These are just the fallback defaults now - per-topic overrides live in topics.organize_model/
+# answer_model/fact_check_model (NULL = use these), set from the LIFF page. Unlike itineraryManager's
+# /模型 (a global `settings`-table override, chat-command only), this is per-topic and UI-driven -
+# see main.py's /api/topics/{id}/model and docs/plan.md for why /模型 itself was skipped.
 #
 # Temporarily on gpt-5-mini instead of Claude: the Anthropic key in .env turned out to be
 # invalid during Phase 1 testing, and rather than block the pipeline test on fixing it, we're

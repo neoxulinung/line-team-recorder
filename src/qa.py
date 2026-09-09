@@ -29,7 +29,10 @@ async def answer_question(env, topic_id: str, question: str) -> str:
     if not doc:
         return "⚠️ 這個主題目前還沒有整理出任何內容"
 
+    topic_row = await env.db.query("SELECT answer_model FROM topics WHERE id = ?", [topic_id])
+    model = (topic_row.results[0]["answer_model"] if topic_row.results else None) or ANSWER_MODEL
+
     user_content = f"主題文件：\n{doc}\n\n---\n\n問題：{question}"
-    answer = await call_llm(env, "answer", topic_id, ANSWER_MODEL, SYSTEM_PROMPT, user_content, max_tokens=1024)
+    answer = await call_llm(env, "answer", topic_id, model, SYSTEM_PROMPT, user_content, max_tokens=1024)
     answer = to_line_plaintext(answer.strip())
     return answer or "🤔 不確定，文件裡沒有找到相關資訊"

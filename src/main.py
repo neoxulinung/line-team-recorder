@@ -23,7 +23,8 @@ from fact_check import fact_check_summary, fact_check_topic
 from liff_page import render as render_liff_page
 from line_client import get_display_name, reply_messages, verify_signature
 from messages import capture_message
-from organize import GENERIC_ORGANIZE_PROMPT, PRESETS, organize_topic, save_doc_revision
+from llm_client import ANSWER_MODEL, FACT_CHECK_MODEL, MODEL_PRICES, ORGANIZE_MODEL
+from organize import GENERIC_ORGANIZE_PROMPT, PRESETS, organize_topic, resync_display_names, save_doc_revision
 from polls import (
     add_option,
     end_poll,
@@ -49,9 +50,44 @@ HELP_TEXT = """🤖 可用指令：
 /記帳 <金額> <說明> [@人1 @人2...] — 記一筆代墊款項（需該主題開放記帳）
 /結算 — 查看目前帳目結算（需該主題開放記帳）
 /投票 開始 <題目>｜新增 <選項>｜結果｜結束 — 投票功能（需該主題開放投票）
+/懶人包 — 取得目前主題的LIFF頁面連結（可在上面編輯整理prompt、手動編輯文件）
 /說明 — 顯示這則說明
 
 Bot只會在主題進行中被動記錄訊息，其餘時間不會插話，所有回覆都要靠上面的指令觸發。"""
+
+
+# LINE's basic ID for this channel (from GET /v2/bot/info) - not a secret, it's the same public
+# ID anyone finds by searching for the bot in LINE. Hardcoded rather than an env var: it's
+# effectively permanent for a given channel, not worth a deploy-config round trip to change.
+LINE_ADD_FRIEND_URL = "https://line.me/R/ti/p/@YOUR_BOT_BASIC_ID"
+
+ADD_FRIEND_NUDGE = {
+    "type": "template",
+    "altText": f"記得加我好友：{LINE_ADD_FRIEND_URL}",
+    "template": {
+        "type": "buttons",
+        # get_display_name (line_client.py) can only resolve a real name for people who've
+        # added the bot as a friend - anyone who hasn't shows up as a raw LINE user ID in the
+        # doc/replies instead of their name (see docs/plan.md's carried-over itineraryManager
+        # lesson). Surfacing this at /開始 time is cheaper than everyone finding out later from
+        # a document full of "U6a4d51e9..." citations.
+        "text": "還沒加我好友的人記得加一下，不然之後訊息裡你的名字會顯示成一串英數字",
+        "actions": [{"type": "uri", "label": "➕ 加好友", "uri": LINE_ADD_FRIEND_URL}],
+    },
+}
+
+
+def _liff_button_message(env: Env, topic: dict, alt_text: str, button_text: str, button_label: str) -> dict:
+    liff_url = f"https://liff.line.me/{env.liff_id}?topicId={topic['id']}"
+    return {
+        "type": "template",
+        "altText": f"{alt_text}：{liff_url}",
+        "template": {
+            "type": "buttons",
+            "text": button_text,
+            "actions": [{"type": "uri", "label": button_label, "uri": liff_url}],
+        },
+    }
 
 
 @app.post("/webhook")
@@ -173,7 +209,17 @@ async def _dispatch_command(env: Env, text: str, message: dict, group_id: str, u
         # this being a generic recorder - bare /開始 has no baggage either way.
         rest = text[len("/開始"):].strip()
         name, enabled = modules.parse_start_args(rest)
-        return await start_topic(env, group_id, user_id, name, enabled)
+        reply, new_topic_id = await start_topic(env, group_id, user_id, name, enabled)
+        if not new_topic_id:
+            return reply
+        nudge = _liff_button_message(
+            env,
+            {"id": new_topic_id},
+            "設定整理prompt",
+            "要不要先設定一下這個主題的整理prompt？預設是通用版，也可以換成旅遊規劃範本或自己寫",
+            "📝 設定整理prompt",
+        )
+        return [{"type": "text", "text": reply}, ADD_FRIEND_NUDGE, nudge]
 
     if cmd == "/結束":
         reply, ended_topic_id = await end_topic(env, group_id, user_id)
@@ -195,7 +241,7 @@ async def _dispatch_command(env: Env, text: str, message: dict, group_id: str, u
             # Unlike itineraryManager (which only fact-checks from the cron path to avoid
             # competing with /整理's tight webhook budget), there's no such budget here -
             # run it after every organize that actually changed something.
-            await fact_check_topic(env, topic["id"], result.new_doc, result.batch_text)
+            await fact_check_topic(env, topic["id"], result.new_doc, result.batch_text, result.fact_check_model)
         return f"✅ 整理完成，處理了 {result.count} 則訊息。" if result.count else "⚠️ 目前沒有新訊息可整理"
 
     if cmd == "/問":
@@ -212,6 +258,14 @@ async def _dispatch_command(env: Env, text: str, message: dict, group_id: str, u
         if not topic:
             return "⚠️ 目前沒有主題資料"
         return await fact_check_summary(env, topic["id"])
+
+    if cmd == "/懶人包":
+        topic = await get_active_or_last_topic(env, group_id)
+        if not topic:
+            return "⚠️ 目前沒有主題資料"
+        return [_liff_button_message(
+            env, topic, f"「{topic['name']}」懶人包", f"「{topic['name']}」文件・整理prompt・記帳・投票", "📖 開啟懶人包"
+        )]
 
     if cmd == "/記帳":
         topic = await get_active_or_last_topic(env, group_id)
@@ -308,7 +362,9 @@ async def get_topic_api(topic_id: str):
     env = get_env()
     row = await env.db.query(
         "SELECT t.name AS name, t.status AS status, t.line_group_id AS line_group_id, "
-        "t.enabled_modules AS enabled_modules, t.organize_prompt AS organize_prompt, d.content_md AS content_md "
+        "t.enabled_modules AS enabled_modules, t.organize_prompt AS organize_prompt, "
+        "t.organize_model AS organize_model, t.answer_model AS answer_model, t.fact_check_model AS fact_check_model, "
+        "d.content_md AS content_md "
         "FROM topics t LEFT JOIN topic_docs d ON d.topic_id = t.id WHERE t.id = ?",
         [topic_id],
     )
@@ -325,6 +381,13 @@ async def get_topic_api(topic_id: str):
         # effective prompt, not the raw nullable column - editing this should start from what's
         # actually in effect, same idea as the doc editor starting from the real content_md.
         "organize_prompt": r["organize_prompt"] or GENERIC_ORGANIZE_PROMPT,
+        # Raw nullable, unlike organize_prompt above - the model picker needs to tell "no
+        # override" apart from "override happens to equal the current default" so it can
+        # pre-select 使用預設 instead of silently pinning today's default as an explicit
+        # override the first time someone opens and saves the form without changing anything.
+        "organize_model": r["organize_model"],
+        "answer_model": r["answer_model"],
+        "fact_check_model": r["fact_check_model"],
     }
     if "記帳" in enabled:
         expenses = await list_expenses(env, topic_id)
@@ -362,6 +425,57 @@ async def update_prompt_api(topic_id: str, request: Request):
     if not exists.results:
         return Response(content=json.dumps({"error": "not found"}), status_code=404, media_type="application/json")
     await env.db.query("UPDATE topics SET organize_prompt = ? WHERE id = ?", [prompt, topic_id])
+    return {"ok": True}
+
+
+@app.post("/api/topics/{topic_id}/resync-names")
+async def resync_names_api(topic_id: str):
+    # No admin/owner gate, same as everything else in this LIFF page.
+    env = get_env()
+    exists = await env.db.query("SELECT 1 FROM topics WHERE id = ?", [topic_id])
+    if not exists.results:
+        return Response(content=json.dumps({"error": "not found"}), status_code=404, media_type="application/json")
+    changed = await resync_display_names(env, topic_id)
+    return {"changed": changed}
+
+
+@app.get("/api/model-options")
+async def get_model_options_api():
+    # Real model IDs, not itineraryManager's short /模型 aliases (sonnet/haiku/...) - those
+    # existed to keep a typed chat command short, a <select> in the UI doesn't need that.
+    return {
+        "models": list(MODEL_PRICES),
+        "defaults": {"organize": ORGANIZE_MODEL, "answer": ANSWER_MODEL, "fact_check": FACT_CHECK_MODEL},
+    }
+
+
+@app.patch("/api/topics/{topic_id}/model")
+async def update_model_api(topic_id: str, request: Request):
+    # Same no-gate trust model as /prompt above. Empty/missing value per purpose = reset to
+    # the llm_client.py default (stored back as NULL, not the resolved default itself, so a
+    # future redeploy that changes the default constant still takes effect for anyone who
+    # never explicitly picked a model).
+    env = get_env()
+    body = json.loads(await request.body())
+    exists = await env.db.query("SELECT 1 FROM topics WHERE id = ?", [topic_id])
+    if not exists.results:
+        return Response(content=json.dumps({"error": "not found"}), status_code=404, media_type="application/json")
+
+    updates = {}
+    for column in ("organize_model", "answer_model", "fact_check_model"):
+        if column not in body:
+            continue
+        value = (body.get(column) or "").strip()
+        if value and value not in MODEL_PRICES:
+            return Response(
+                content=json.dumps({"error": f"unknown model for {column}: {value}"}), status_code=400, media_type="application/json"
+            )
+        updates[column] = value or None
+    if not updates:
+        return {"ok": True}
+
+    set_clause = ", ".join(f"{column} = ?" for column in updates)
+    await env.db.query(f"UPDATE topics SET {set_clause} WHERE id = ?", [*updates.values(), topic_id])
     return {"ok": True}
 
 
@@ -531,7 +645,7 @@ async def scheduled_organize(request: Request):
         try:
             result = await organize_topic(env, row["id"])
             if result.new_doc:
-                await fact_check_topic(env, row["id"], result.new_doc, result.batch_text)
+                await fact_check_topic(env, row["id"], result.new_doc, result.batch_text, result.fact_check_model)
         except Exception as e:
             print(f"[scheduled_organize error] topic={row['id']} {type(e).__name__}: {e}")
     return {"ok": True}

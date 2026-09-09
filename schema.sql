@@ -6,6 +6,13 @@ CREATE TABLE topics (
   owner_line_user_id TEXT NOT NULL,
   organize_prompt TEXT,              -- NULL = use organize.py's GENERIC_ORGANIZE_PROMPT; per-topic
                                       -- customization is Phase 3 (LIFF editor), column exists now
+  -- NULL = use llm_client.py's ORGANIZE_MODEL/ANSWER_MODEL/FACT_CHECK_MODEL constant. Per-topic,
+  -- not global like itineraryManager's /模型 (settings table) - set from the LIFF page next to
+  -- organize_prompt, same NULL-means-default pattern, no separate admin gate (matches the rest
+  -- of this LIFF page - see main.py's get_topic_api).
+  organize_model TEXT,
+  answer_model TEXT,
+  fact_check_model TEXT,
   -- Comma-separated module names enabled at /開始 time (e.g. "記帳,投票"), not one column per
   -- module - see modules.py. Adding a future module never needs a schema migration this way.
   enabled_modules TEXT NOT NULL DEFAULT '',
