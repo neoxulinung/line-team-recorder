@@ -48,6 +48,7 @@ let TOPIC_DATA = null;
 let ME = null;           // { userId, displayName } from liff.getProfile()
 let EDITING_ID = null;   // expense id being edited, or null for "create new"
 let DOC_HISTORY = [];    // last fetched revisions list, for viewDocRevision(index) to read back
+let PROMPT_PRESETS = {}; // name -> prompt text, fetched once in main()
 
 function escapeHtml(s) {
   return String(s == null ? '' : s)
@@ -101,6 +102,10 @@ function render(data) {
     '</div>' +
     '<div id="promptEditForm" style="display:none">' +
       '<p class="meta">這段文字決定AI怎麼把新訊息整理進文件，改了之後下次整理才會套用。</p>' +
+      '<select id="presetSelect" onchange="applyPromptPreset()" style="width:100%; box-sizing:border-box; ' +
+        'padding:8px; margin-bottom:8px; border:1px solid #ddd; border-radius:6px;">' +
+        '<option value="">套用範本…（選了會覆蓋下方文字，可再自行修改）</option>' +
+      '</select>' +
       '<textarea id="promptTextarea" style="width:100%; box-sizing:border-box; min-height:160px; ' +
         'font-size:14px; padding:10px; border:1px solid #ddd; border-radius:6px;"></textarea>' +
       '<div style="margin-top:8px;">' +
@@ -180,7 +185,22 @@ function startPromptEdit() {
   document.getElementById('docEditForm').style.display = 'none';
   document.getElementById('docView').style.display = 'none';
   document.getElementById('promptTextarea').value = TOPIC_DATA.organize_prompt || '';
+  const select = document.getElementById('presetSelect');
+  select.length = 1; // keep the placeholder option, drop any options from a previous open
+  Object.keys(PROMPT_PRESETS).forEach(function (name) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+  });
+  select.value = '';
   document.getElementById('promptEditForm').style.display = 'block';
+}
+
+function applyPromptPreset() {
+  const name = document.getElementById('presetSelect').value;
+  if (!name) return;
+  document.getElementById('promptTextarea').value = PROMPT_PRESETS[name];
 }
 
 function cancelPromptEdit() {
@@ -477,6 +497,7 @@ async function main() {
   const pageEl = document.getElementById('page');
   try { await liff.init({ liffId: "__LIFF_ID__" }); } catch (e) { /* fine outside LINE too */ }
   try { ME = await liff.getProfile(); } catch (e) { ME = null; }
+  try { PROMPT_PRESETS = await api('/api/prompt-presets'); } catch (e) { PROMPT_PRESETS = {}; }
 
   TOPIC_ID = new URLSearchParams(location.search).get('topicId');
   if (!TOPIC_ID) {

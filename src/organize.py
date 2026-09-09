@@ -35,6 +35,35 @@ GENERIC_ORGANIZE_PROMPT = (
     "直接輸出完整更新後的markdown全文，不要加任何額外說明、不要用程式碼區塊包起來。"
 )
 
+# Ported from itineraryManager's organize.py SYSTEM_PROMPT, trimmed of two rules that don't
+# apply here: photo embedding (this project doesn't capture images, see messages.py) and
+# unsend-message handling (no unsend webhook event is captured either). The original's "this
+# heading gets parsed by code, don't remove it" line is also dropped - unlike itineraryManager,
+# nothing here reads "## 未定事項" back out, so it would be a false claim.
+TRAVEL_ORGANIZE_PROMPT = """你是旅行規劃助手的整理引擎。你會收到一份目前的旅程markdown文件、一段近期對話（僅供參考），以及一批新的LINE群組討論訊息。
+你的工作是把「新增的討論內容」中「旅遊規劃相關」的內容整合進文件裡，回傳完整的、更新後的整份markdown文件。
+
+規則：
+1. 只有旅遊規劃相關的內容才需要整理（行程、住宿、交通、餐廳、票券、集合時間等）。閒聊、貼圖、無關對話請忽略，不要為它們新增任何內容。
+2. 只修改受「新增的討論內容」影響的部分，其餘既有內容原封不動保留，不要整篇重寫或改寫語氣。「近期對話」只是提供上下文幫助你理解「新增的討論內容」，不需要為「近期對話」本身新增或修改文件內容，也不要重複引用「近期對話」裡的訊息。
+3. 每個新增或修改的結論，旁邊用一行小字附上來源引用，格式類似：_(依 王小明 8/20 14:02 提及)_，日期用訊息的實際日期。
+4. 文件維持這個章節骨架：
+   ## 時間軸 —— 依日期(Day1, Day2...)列出已經確定的行程，日期還不確定就寫「日期未定」
+   ## 未定事項 —— 還在討論、尚未拍板的事情，用checkbox列表 `- [ ] ...`
+   ## 其他資訊 —— 機票、訂房確認信、重要連結等不屬於時間軸的資訊
+5. 如果訊息讓某件事從未定變成已定（或反過來被推翻），把它從對應章節移過去，不要兩邊同時留著重複內容。
+6. 不要憑空捏造內容、不要猜測日期，資料沒有明確提到就不要寫。
+7. 對話中常有一人提問、另一人（甚至是自己）在後續幾則訊息才回答的情況（例如「機票訂了嗎」→ 幾則之後「13號」）。請先通盤讀過「新增的討論內容」，把問句和對應的回答串起來理解事情的全貌，不要只因為某則訊息單獨看起來像片段、太簡短，或跟前一句話中間隔了幾則其他訊息，就忽略它或誤判成閒聊。
+8. 直接輸出完整更新後的markdown全文，不要加任何額外說明、不要用程式碼區塊包起來。"""
+
+# LIFF prompt-editor dropdown. Values are the actual prompt text - selecting one just fills
+# the textarea, the owner can still edit before saving. Add an entry here to add a preset;
+# no other code needs to change.
+PRESETS = {
+    "通用（預設）": GENERIC_ORGANIZE_PROMPT,
+    "旅遊規劃": TRAVEL_ORGANIZE_PROMPT,
+}
+
 
 def validate_doc(doc: str) -> None:
     # Only requirement: keep the "# <topic name>" title. Unlike itineraryManager's

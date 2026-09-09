@@ -45,3 +45,9 @@ LIFF頁面（`liff_page.py`）現在有`ME`/`liff.getProfile()`身分（記帳/�
 **Phase 3（LIFF編輯prompt＋手動編輯文件/版本歷史）已完成並部署上線**：`organize.py`的`validate_doc`/`save_doc_revision`跟`topic_doc_revisions`表Phase 1就做好了，Phase 3只是把API端點（`PATCH .../doc`、`GET .../doc/revisions`、`POST .../doc/revisions/{id}/restore`）跟LIFF UI補上，另外新增`PATCH .../prompt`編輯`topics.organize_prompt`。UI設計直接沿用itineraryManager**已經走過兩輪使用者回饋**修正後的版本，不是從頭設計：編輯紀錄一開始就放在頁面最下面（記帳/投票區塊之後）、預設收合、只顯示最近3筆、點開/查看時都有`scrollIntoView`——這些都是itineraryManager實際被使用者抱怨「畫面沒反應」「太礙眼」之後才修出來的，這次直接套用，沒有重新踩一次。
 
 **這次自己抓到的bug**（itineraryManager沒有的）：`liff_page.py`一開始寫成`<h1>{name}</h1>` + 渲染後的`content_md`兩者疊在一起，但`content_md`本身一定以`# 主題名稱`開頭（`validate_doc`要求），導致主題名稱在頁面上會顯示兩次。itineraryManager沒有這個問題是因為它從來就沒有另外加`<h1>`，直接讓文件自己的標題顯示。已修正：拿掉多餘的`<h1>`，跟itineraryManager做法一致。
+
+## 公開版發布後新增的功能
+
+**整理prompt範本選單**：`organize.py`新增`TRAVEL_ORGANIZE_PROMPT`（從itineraryManager的`SYSTEM_PROMPT`搬過來，拿掉照片embed跟收回訊息處理這兩條規則——這個專案的訊息收集管線不支援這兩種事件，見下方）跟`PRESETS`dict，`GET /api/prompt-presets`把它暴露出去，LIFF編輯prompt的表單多一個下拉選單，選了就把對應文字填進textarea（使用者還能繼續手動改，不是直接送出）。要加新範本只需要在`PRESETS`裡加一筆。
+
+**確認過的功能缺口**：照片記錄跟收回訊息（unsend）處理，itineraryManager都有、這個專案都還沒做——`messages.py`目前非文字事件直接`return`跳過。這兩個是通用需求（不是旅遊專屬），如果要補，得動到LINE webhook事件處理（新增image event capture、R2上傳、unsend event更新訊息狀態），跟prompt範本是分開的、比較大的功能缺口，還沒排進哪個phase。

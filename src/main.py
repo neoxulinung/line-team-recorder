@@ -21,7 +21,7 @@ from fact_check import fact_check_summary, fact_check_topic
 from liff_page import render as render_liff_page
 from line_client import get_display_name, reply_messages, verify_signature
 from messages import capture_message
-from organize import GENERIC_ORGANIZE_PROMPT, organize_topic, save_doc_revision
+from organize import GENERIC_ORGANIZE_PROMPT, PRESETS, organize_topic, save_doc_revision
 from polls import (
     add_option,
     end_poll,
@@ -283,6 +283,11 @@ async def get_topic_api(topic_id: str):
                 "options": await get_options_with_votes(env, poll["id"]),
             }
     return result
+
+
+@app.get("/api/prompt-presets")
+async def get_prompt_presets_api():
+    return PRESETS
 
 
 @app.patch("/api/topics/{topic_id}/prompt")
